@@ -9,70 +9,88 @@ let state = {
     board: [null, null, null, null, null],
     opponents: [],
     nextOppId: 1,
-    activeSelection: null
+    activeSelection: null,
+    worker: null // 存储 Worker 实例
 };
 
-// 初始化
 function init() {
     createSlots('board-container', 5, 'board');
     createSlots('my-hand-container', 2, 'my');
     renderPickerGrid();
     addOpponent();
+    
+    // 监听模拟次数变化
+    document.getElementById('sim-input').onchange = () => startSimulation();
 }
 
-// --- 核心网络请求 ---
-async function requestCalculation() {
-    const simCount = parseInt(document.getElementById('sim-input').value) || 20000;
-    
-    // 基础校验
-    if(!state.myHand[0] || !state.myHand[1]) return;
-
-    // UI Loading 状态
-    document.getElementById('loading-indicator').style.display = 'inline';
-    document.body.style.cursor = 'wait';
-
-    try {
-        const payload = {
-            myHand: state.myHand,
-            board: state.board,
-            opponents: state.opponents.map(o => ({ id: o.id, cards: o.cards })),
-            simCount: simCount
-        };
-
-        const response = await fetch('/api/calculate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-
-        const resData = await response.json();
-
-        if (resData.success) {
-            updateUI(resData.data);
-        } else {
-            console.error(resData.error);
-        }
-
-    } catch (err) {
-        console.error("请求失败", err);
-        alert("服务器繁忙或网络错误");
-    } finally {
-        document.getElementById('loading-indicator').style.display = 'none';
-        document.body.style.cursor = 'default';
+// --- 核心：Web Worker 管理 ---
+function startSimulation() {
+    // 1. 基础校验：必须有手牌
+    if(!state.myHand[0] || !state.myHand[1]) {
+        updateUI(null); // 清空数据
+        return;
     }
+
+    // 2. 终止旧的 Worker (如果正在跑)
+    if (state.worker) {
+        state.worker.terminate();
+    }
+
+    // 3. 创建新 Worker
+    state.worker = new Worker('./worker.js');
+
+    // 4. 显示加载状态
+    document.getElementById('loading-indicator').style.display = 'inline';
+    document.getElementById('loading-indicator').innerText = '计算中 0%';
+
+    // 5. 发送数据给 Worker
+    const simCount = parseInt(document.getElementById('sim-input').value) || 100000;
+    state.worker.postMessage({
+        myHand: state.myHand,
+        board: state.board,
+        opponents: state.opponents.map(o => ({ id: o.id, cards: o.cards })),
+        simCount: simCount
+    });
+
+    // 6. 接收 Worker 反馈
+    state.worker.onmessage = function(e) {
+        const { type, completed, total, result } = e.data;
+
+        if (type === 'progress') {
+            // 更新进度条和实时胜率
+            const pct = Math.round((completed / total) * 100);
+            document.getElementById('loading-indicator').innerText = `计算中 ${pct}%`;
+            
+            // 实时更新UI数据
+            updateUI(result);
+        } 
+        else if (type === 'done') {
+            document.getElementById('loading-indicator').style.display = 'none';
+        }
+    };
 }
 
 function updateUI(data) {
+    if(!data) {
+        document.getElementById('my-win').innerText = '--%';
+        document.getElementById('my-tie').innerText = '';
+        state.opponents.forEach(o => {
+            const el = document.getElementById(`win-opp-${o.id}`);
+            if(el) el.innerText = '--%';
+        });
+        return;
+    }
+
     const total = data.simulations;
     const p = (n) => ((n/total)*100).toFixed(1) + '%';
 
-    // 更新自己
+    // 我方
     const myWinEl = document.getElementById('my-win');
     myWinEl.innerText = p(data.my.win);
     myWinEl.style.color = (data.my.win/total > 0.5) ? '#2ecc71' : '#f1c40f';
     document.getElementById('my-tie').innerText = data.my.tie > 0 ? `平: ${p(data.my.tie)}` : '';
 
-    // 更新对手
+    // 对手
     for (let oppId in data.opponents) {
         const stats = data.opponents[oppId];
         const winEl = document.getElementById(`win-opp-${oppId}`);
@@ -86,7 +104,7 @@ function updateUI(data) {
     }
 }
 
-// --- 以下是界面逻辑 (与之前类似，但移除了本地计算) ---
+// --- 界面交互逻辑 ---
 
 function createSlots(id, count, type, oppId=null) {
     const el = document.getElementById(id);
@@ -101,18 +119,26 @@ function createSlots(id, count, type, oppId=null) {
     }
 }
 
+// 优化后的横向滚动选牌器
 function renderPickerGrid() {
     const grid = document.getElementById('picker-grid');
     grid.innerHTML = '';
+    
     SUITS.forEach(suit => {
+        const row = document.createElement('div');
+        row.className = 'suit-row';
+        
         RANKS.forEach(rank => {
             const div = document.createElement('div');
             div.className = 'picker-card';
-            div.innerHTML = rank + (suit === 'h' || suit === 'd' ? `<span style="color:red">${SUIT_SYMBOLS[suit]}</span>` : `<span>${SUIT_SYMBOLS[suit]}</span>`);
+            const isRed = (suit === 'h' || suit === 'd');
+            div.innerHTML = `${rank}<span style="color:${isRed ? '#e74c3c' : '#2c3e50'}">${SUIT_SYMBOLS[suit]}</span>`;
             div.onclick = () => selectCard(rank, suit);
             div.dataset.code = rank + suit;
-            grid.appendChild(div);
+            row.appendChild(div);
         });
+        
+        grid.appendChild(row);
     });
 }
 
@@ -138,15 +164,14 @@ function addOpponent() {
     `;
     container.appendChild(div);
     createSlots(`opp-slots-${opp.id}`, 2, 'opp', opp.id);
-    // 每次变动不再自动计算，需要节省服务器资源，或你可以取消下面注释开启自动请求
-    // requestCalculation(); 
+    startSimulation(); // 添加对手后自动重算
 }
 
 function removeOpponent(id) {
     if(state.opponents.length <= 1) return;
     state.opponents = state.opponents.filter(o => o.id !== id);
     document.getElementById(`opp-row-${id}`).remove();
-    requestCalculation();
+    startSimulation(); // 删除对手后自动重算
 }
 
 function openPicker(type, index, oppId) {
@@ -166,7 +191,7 @@ function updatePickerState() {
     state.board.forEach(add);
     state.opponents.forEach(o => o.cards.forEach(add));
     
-    // 获取当前选中的牌（如果有）
+    // 当前正在选的这位置不禁用
     let current = null;
     const { type, index, oppId } = state.activeSelection;
     if(type === 'my') current = state.myHand[index];
@@ -184,13 +209,16 @@ function updatePickerState() {
 function selectCard(rank, suit) {
     const card = { rank, suit };
     const { type, index, oppId } = state.activeSelection;
+    
     if(type === 'my') state.myHand[index] = card;
     else if(type === 'board') state.board[index] = card;
     else if(type === 'opp') state.opponents.find(o=>o.id===oppId).cards[index] = card;
     
     updateSlotUI(type, index, oppId, card);
     closePicker();
-    requestCalculation(); // 选完牌自动请求
+    
+    // 选完牌，立即触发 Worker 计算
+    startSimulation();
 }
 
 function clearSlot() {
@@ -201,7 +229,7 @@ function clearSlot() {
     
     updateSlotUI(type, index, oppId, null);
     closePicker();
-    requestCalculation();
+    startSimulation();
 }
 
 function updateSlotUI(type, index, oppId, card) {
@@ -218,11 +246,6 @@ function updateSlotUI(type, index, oppId, card) {
 }
 
 function resetAll() {
-    state.myHand = [null, null];
-    state.board = [null, null, null, null, null];
-    state.opponents.forEach(o => { o.cards = [null, null]; });
-    
-    // 简单刷新页面即可，或者手动清空DOM
     location.reload();
 }
 

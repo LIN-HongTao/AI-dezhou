@@ -1,24 +1,27 @@
-// functions/api/calculate.js
+// public/worker.js
 
-// --- 1. 这里放入核心算法 (直接复制之前的 evaluate7 函数) ---
+// --- 德州扑克核心算法 ---
 const RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'];
 const RANK_VALUES = {'2':2, '3':3, '4':4, '5':5, '6':6, '7':7, '8':8, '9':9, 'T':10, 'J':11, 'Q':12, 'K':13, 'A':14};
 const SUITS = ['s', 'h', 'd', 'c'];
 
+// 牌力评估函数 (7张牌)
 function evaluate7(cards) {
-    const processedCards = cards.map(c => ({
-        ...c,
-        val: RANK_VALUES[c.rank] || c.val
+    // 数据标准化
+    const cList = cards.map(c => ({
+        suit: c.suit,
+        val: c.val || RANK_VALUES[c.rank]
     }));
 
     let suitCounts = {s:0, h:0, d:0, c:0};
     let ranks = [];
-    for(let c of processedCards) {
+    for(let c of cList) {
         suitCounts[c.suit]++;
         ranks.push(c.val);
     }
     ranks.sort((a,b)=>b-a);
 
+    // 1. 同花 & 同花顺
     let flushSuit = null;
     if(suitCounts.s >=5) flushSuit = 's';
     else if(suitCounts.h >=5) flushSuit = 'h';
@@ -28,6 +31,7 @@ function evaluate7(cards) {
     const getStraight = (vals) => {
         let v = [...new Set(vals)];
         if(v.length < 5) return 0;
+        // A-2-3-4-5 特判
         if(v.includes(14) && v.includes(2) && v.includes(3) && v.includes(4) && v.includes(5)) {
             let norm = 0;
             for(let i=0; i<=v.length-5; i++) if(v[i]-v[i+4]===4) { norm = v[i]; break; }
@@ -38,16 +42,19 @@ function evaluate7(cards) {
     };
 
     if(flushSuit) {
-        let fRanks = processedCards.filter(c=>c.suit===flushSuit).map(c=>c.val).sort((a,b)=>b-a);
+        let fRanks = cList.filter(c=>c.suit===flushSuit).map(c=>c.val).sort((a,b)=>b-a);
         let sf = getStraight(fRanks);
         if(sf) return 8000000 + sf;
         return 5000000 + fRanks[0]*10000 + fRanks[1]*1000 + fRanks[2]*100 + fRanks[3]*10 + fRanks[4];
     }
 
+    // 2. 四条/葫芦/三条/两对/一对/高牌
     let counts = {};
     for(let r of ranks) counts[r] = (counts[r]||0)+1;
+    
     let four=[], three=[], pair=[];
     let uniqueRanks = Object.keys(counts).map(Number).sort((a,b)=>b-a);
+    
     for(let r of uniqueRanks) {
         let n = counts[r];
         if(n===4) four.push(r);
@@ -61,6 +68,7 @@ function evaluate7(cards) {
     }
     if(three.length >= 2) return 6000000 + three[0]*100 + three[1];
     if(three.length && pair.length) return 6000000 + three[0]*100 + pair[0];
+    
     if(three.length) {
         let k = ranks.filter(r => r!==three[0]).slice(0,2);
         return 3000000 + three[0]*10000 + k[0]*100 + k[1];
@@ -73,37 +81,42 @@ function evaluate7(cards) {
         let k = ranks.filter(r => r!==pair[0]).slice(0,3);
         return 1000000 + pair[0]*100000 + k[0]*1000 + k[1]*10 + k[2];
     }
+    
     return ranks[0]*10000 + ranks[1]*1000 + ranks[2]*100 + ranks[3]*10 + ranks[4];
 }
 
-// --- 2. Cloudflare Pages Function 的入口处理函数 ---
-export async function onRequestPost({ request }) {
-    try {
-        const data = await request.json();
-        const { myHand, board, opponents, simCount } = data;
+// --- 监听主线程消息 ---
+self.onmessage = function(e) {
+    const { myHand, board, opponents, simCount } = e.data;
+    
+    // 初始化统计
+    const TARGET_SIMS = simCount || 100000;
+    let myStats = { win: 0, tie: 0 };
+    let oppStats = {};
+    opponents.forEach(o => oppStats[o.id] = { win: 0, tie: 0 });
 
-        // Cloudflare Function 免费版有 CPU 时间限制 (10ms-50ms)
-        // 这里的模拟次数如果太大，可能会超时报错。建议设个上限。
-        const SIMULATIONS = Math.min(simCount || 10000, 30000); 
+    // 准备牌堆
+    let used = new Set();
+    const addUsed = c => { if(c) used.add(c.rank+c.suit); };
+    myHand.forEach(addUsed);
+    board.forEach(addUsed);
+    opponents.forEach(o => o.cards.forEach(addUsed));
 
-        let myStats = { win: 0, tie: 0 };
-        let oppStats = {};
-        opponents.forEach(o => oppStats[o.id] = { win: 0, tie: 0 });
-
-        let used = new Set();
-        const addUsed = c => { if(c) used.add(c.rank+c.suit); };
-        myHand.forEach(addUsed);
-        board.forEach(addUsed);
-        opponents.forEach(o => o.cards.forEach(addUsed));
-
-        let deckTemplate = [];
-        SUITS.forEach(s => {
-            RANKS.forEach(r => {
-                if(!used.has(r+s)) deckTemplate.push({ rank:r, suit:s, val:RANK_VALUES[r] });
-            });
+    let deckTemplate = [];
+    SUITS.forEach(s => {
+        RANKS.forEach(r => {
+            if(!used.has(r+s)) deckTemplate.push({ rank:r, suit:s, val:RANK_VALUES[r] });
         });
+    });
 
-        for(let i=0; i<SIMULATIONS; i++) {
+    // 开始模拟循环
+    // 为了不阻塞进度汇报，我们将计算分块
+    let completed = 0;
+    const BATCH_SIZE = 2000; // 每2000次汇报一次进度
+
+    function runBatch() {
+        for(let i=0; i<BATCH_SIZE && completed < TARGET_SIMS; i++) {
+            // 极速洗牌
             let deck = [...deckTemplate];
             let deckIdx = deck.length;
             const draw = () => {
@@ -115,9 +128,11 @@ export async function onRequestPost({ request }) {
                 return temp;
             };
 
+            // 补全公共牌
             let simBoard = [...board];
             for(let k=0; k<5; k++) if(!simBoard[k]) simBoard[k] = draw();
 
+            // 补全对手牌
             let simOppHands = [];
             opponents.forEach(o => {
                 let h = [...o.cards];
@@ -126,6 +141,7 @@ export async function onRequestPost({ request }) {
                 simOppHands.push({ id: o.id, hand: h });
             });
 
+            // 比牌
             let myScore = evaluate7([...myHand, ...simBoard]);
             let maxScore = myScore;
             let winners = ['my'];
@@ -140,6 +156,7 @@ export async function onRequestPost({ request }) {
                 }
             });
 
+            // 记录结果
             if(winners.length === 1) {
                 if(winners[0] === 'my') myStats.win++;
                 else oppStats[winners[0]].win++;
@@ -149,20 +166,29 @@ export async function onRequestPost({ request }) {
                     if(id !== 'my') oppStats[id].tie++;
                 });
             }
+            completed++;
         }
 
-        return new Response(JSON.stringify({
-            success: true,
-            data: {
-                simulations: SIMULATIONS,
+        // 发送进度给主线程
+        self.postMessage({
+            type: 'progress',
+            completed: completed,
+            total: TARGET_SIMS,
+            result: {
+                simulations: completed,
                 my: myStats,
                 opponents: oppStats
             }
-        }), {
-            headers: { "Content-Type": "application/json" }
         });
 
-    } catch (err) {
-        return new Response(JSON.stringify({ error: err.message }), { status: 500 });
+        if(completed < TARGET_SIMS) {
+            // 继续下一批
+            setTimeout(runBatch, 0); 
+        } else {
+            // 完成
+            self.postMessage({ type: 'done' });
+        }
     }
-}
+
+    runBatch();
+};
