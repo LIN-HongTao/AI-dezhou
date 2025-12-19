@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>德州扑克胜率计算器 (Server版)</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="navbar">
+        <h1>♠️ 德州胜率 Pro (Online)</h1>
+        <div class="settings-area">
+            <input type="number" id="sim-input" class="sim-input" value="100000" step="10000">
+            <button class="btn-mini" onclick="requestCalculation()">刷新</button>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <div class="panel board-panel">
+            <div class="panel-header">公共牌 <span id="loading-indicator" style="display:none; color:#f1c40f;">计算中...</span></div>
+            <div class="card-row" id="board-container"></div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">我的手牌 (Hero)</div>
+            <div class="card-row" id="my-hand-container" style="justify-content: flex-start;"></div>
+            <div class="result-stats">
+                <div class="win-percent" id="my-win">--%</div>
+                <div class="tie-percent" id="my-tie"></div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">对手列表</div>
+            <div id="opponents-list"></div>
+            <div class="bottom-actions">
+                <button class="btn-main btn-add" onclick="addOpponent()">+ 添加对手</button>
+                <button class="btn-main btn-reset" onclick="resetAll()">重置牌局</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="picker-modal">
+        <div class="modal-content">
+            <div class="picker-header">选择扑克牌</div>
+            <div class="picker-grid" id="picker-grid"></div>
+            <div class="modal-actions">
+                <button class="modal-btn btn-clear" onclick="clearSlot()">清除</button>
+                <button class="modal-btn btn-close" onclick="closePicker()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="client.js"></script>
+</body>
+</html>
